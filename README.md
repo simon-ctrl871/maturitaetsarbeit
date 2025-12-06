@@ -3,4 +3,11 @@ In meiner Maturitätsarbeit entwickelte ich ein Offline-Navigationssytem mit Ard
 
 Ich habe hier auf GitHub ebenfalls den finalen Code hochgeladen, sowie mein Arbeitsjournal und jegliche Chatverläufe mit ChatGPT, die während der Entwicklungsphase enstanden sind. 
 
+Hier ist eine Hilfestellung, um zu einem bestimmten Kapitel oder Abschnitt der schriftlichen Arbeit den zugehörigen Chatverlauf zu finden. Dabei ist zu beachten, dass diese Chatverläufe sehr lange sind und sich oft nur ein Ausschnitt auf den angegebenen Abschnitt bezieht.
+
+- Kompatibilitätstest -> Arduino Raspberry Pi Zusammenarbeit, Bluetooth Steuerung für Spotify
+- Valhalla Routing-Engine -> Bluetooth Steuerung für Spotify
+- OpenStreetMap -> Valhalla Installation Raspberry Pi
+- GPS-Empfänger -> USB GPS am Raspberry Pi
+
 
