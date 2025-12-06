@@ -12,6 +12,7 @@ Hier ist eine Hilfestellung, um zu einem bestimmten Kapitel oder Abschnitt der s
 - Navigation mit Piktogrammen -> Valhalla Installation Raspberry Pi
 - Display Optimierung -> Valhalla Installation Raspberry Pi, Navigationssystem Zusammenfassung
 - Automatisierter Navigationsstart -> Valhalla Navigation Raspberry Pi, Navigationssystem Zusammenfassung
+- Steuerung über das Smartphone -> WLAN mit Hotspot verbinden
 
 
 
