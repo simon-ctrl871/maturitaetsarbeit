@@ -1,0 +1,61 @@
+Weiter zum Inhalt
+Chatverlauf
+
+Du:
+ich möchte über cmd per ssh in my raspberry pi
+ChatGPT:
+Kein Problem! Hier ist eine einfache Schritt-für-Schritt-Anleitung, wie du per CMD (Eingabeaufforderung unter Windows) eine SSH-Verbindung zu deinem Raspberry Pi herstellen kannst:
+
+🔧 Voraussetzungen
+Dein Raspberry Pi muss eingeschaltet und mit dem Netzwerk verbunden sein.
+
+SSH muss auf dem Raspberry Pi aktiviert sein.
+
+Falls noch nicht aktiviert: Erstelle eine Datei mit dem Namen ssh (ohne Endung) im Boot-Verzeichnis der SD-Karte.
+
+Du kennst die IP-Adresse des Raspberry Pi.
+
+Du kennst Benutzername und Passwort (Standard: pi / raspberry, falls nicht geändert).
+
+✅ Schritt 1: IP-Adresse des Raspberry Pi herausfinden
+Falls du die IP-Adresse noch nicht kennst, kannst du:
+
+Auf deinem Router nachsehen (z. B. unter „verbundene Geräte“).
+
+Oder, wenn du Tastatur/Monitor am Pi hast:
+
+hostname -I
+✅ Schritt 2: SSH über CMD verwenden
+Öffne die Eingabeaufforderung (CMD) auf deinem Windows-PC:
+
+Win + R → cmd → Enter
+
+Gib folgenden Befehl ein (ersetze pi und die IP mit deinen Werten):
+
+ssh pi@192.168.1.42
+Beim ersten Mal wirst du gefragt, ob du dem Host vertraust – gib yes ein.
+
+Dann wirst du nach dem Passwort gefragt → gib es ein (Hinweis: Beim Tippen wird nichts angezeigt, das ist normal).
+
+📌 Beispiel
+ssh pi@192.168.178.50
+Wenn alles klappt, siehst du sowas wie:
+
+pi@raspberrypi:~ $
+Jetzt bist du auf deinem Raspberry Pi per SSH angemeldet 🎉
+
+❓ Falls es nicht funktioniert
+Fehlermeldung "ssh nicht erkannt" → Dann musst du eventuell OpenSSH aktivieren oder installieren.
+
+Firewall oder Netzwerkproblem? → Stelle sicher, dass dein PC und Pi im selben Netzwerk sind.
+
+SSH nicht aktiviert? → Lege auf der SD-Karte im Verzeichnis boot eine leere Datei namens ssh an (ohne Endung, keine Datei-Erweiterung).
+
+Wenn du willst, kann ich dir auch helfen, ein SSH-Tool wie PuTTY zu nutzen, oder du kannst SSH direkt über Windows PowerShell oder WSL machen.
+
+Möchtest du auch eine Anleitung für die Einrichtung von Schlüsselbasierter Authentifizierung statt Passwort?
+
+
+
+Keine ausgewähltKeine ausgewählt
+ChatGPT kann Fehler machen. Überprüfe wichtige Informationen.

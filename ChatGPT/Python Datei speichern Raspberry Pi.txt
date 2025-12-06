@@ -1,0 +1,42 @@
+Weiter zum Inhalt
+Chatverlauf
+
+Du:
+wie speichert man eine Python datei im Raspberry Pi Terminal
+ChatGPT:
+Um eine Python-Datei im Raspberry Pi Terminal zu speichern, gehst du folgendermaßen vor:
+
+✅ Möglichkeit 1: Mit dem Editor nano (am einfachsten)
+Terminal öffnen
+
+Gib ein:
+
+nano mein_script.py
+(ersetze mein_script.py mit dem gewünschten Dateinamen)
+
+Jetzt öffnet sich der Editor. Dort schreibst du deinen Python-Code, z. B.:
+
+print("Hallo vom Raspberry Pi!")
+Speichern & Beenden:
+
+Drücke CTRL + O (für "Write Out") → bestätigt mit Enter
+
+Dann CTRL + X (um den Editor zu verlassen)
+
+Jetzt ist die Datei gespeichert!
+
+✅ Möglichkeit 2: Mit dem Editor vim oder vi (für Fortgeschrittene)
+vim mein_script.py
+(aber einfacher ist für Einsteiger nano)
+
+✅ Datei ausführen
+Nachdem du deine Datei gespeichert hast, kannst du sie so ausführen:
+
+python3 mein_script.py
+Möchtest du auch wissen, wie man die Datei ausführbar macht (chmod +x) oder automatisch starten lässt beim Booten?
+
+
+
+
+Keine ausgewähltKeine ausgewählt
+ChatGPT kann Fehler machen. Überprüfe wichtige Informationen.

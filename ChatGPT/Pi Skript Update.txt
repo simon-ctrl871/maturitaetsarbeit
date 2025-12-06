@@ -1,0 +1,971 @@
+Weiter zum Inhalt
+Chatverlauf
+
+Du:
+das sind nun die Piktogramme auf für das Arduino:
+/ Array of all bitmaps for convenience. (Total bytes used to store images in PROGMEM = 3696)
+const int epd_bitmap_allArray_LEN = 7;
+const unsigned char* epd_bitmap_allArray[7] = {
+	epd_bitmap_Pfeil_geradeaus,
+	epd_bitmap_Pfeil_links_abbiegen,
+	epd_bitmap_Pfeil_links_einspuren,
+	epd_bitmap_Pfeil_rechts_abbiegen,
+	epd_bitmap_Pfeil_rechts_einspuren,
+	epd_bitmap_Z_Kreisverkehr_basic,
+	epd_bitmap_all_black
+
+all_black soll gezeigt werden, wenn ich kein GPS habe oder die Route noch nicht gestartet wurde ("Warte auf Anweisung")
+
+um das Arduino Skript kümmern wir uns später. Zuerst das Pi Skript. Das hier ist das alte:
+
+# >>> ZIEL & MAUT (nur diese 3 Zeilen bei Bedarf ändern) <<<
+DST_LAT = 47.1662         # Ziel-Breitengrad
+DST_LON = 8.5160          # Ziel-Längengrad
+EXCLUDE_TOLLS = True      # True = Maut vermeiden, False = Maut erlaubt
+
+# ===== ab hier nichts mehr ändern, außer Port/Baud falls nötig =====
+import json, subprocess, time, threading, os, sys, math, argparse
+import RPi.GPIO as GPIO
+import serial
+
+# Hardware/Timing
+BTN_PIN = 26                     # BCM 26 → Start Navigation
+BTN_SHUTDOWN = 19                # BCM 19 → Shutdown
+SERIAL_DEV = "/dev/ttyACM0"      # Arduino-Display
+BAUD = 115200
+INTERVAL = 3                     # Sekunden zwischen Updates
+VALHALLA_URL = "http://localhost:8002/route"
+
+# Icon-Indizes müssen zum Arduino/bitmaps.h passen:
+# 0=geradeaus, 1=links abbiegen, 2=links einspuren/halten, 3=rechts abbiegen, 4=rechts einspuren/halten, 5=Kreisverkehr
+ICON_STRAIGHT     = 0
+ICON_TURN_LEFT    = 1
+ICON_KEEP_LEFT    = 2
+ICON_TURN_RIGHT   = 3
+ICON_KEEP_RIGHT   = 4
+ICON_ROUNDABOUT   = 5
+
+_running = False
+_stop = False
+_last_fix_time = 0
+_args = None
+
+def log(msg):
+    if _args and _args.debug:
+        ts = time.strftime("[%H:%M:%S]")
+        print(f"{ts} {msg}")
+
+# ---------------- GPS ----------------
+def _get_gps(timeout_s=6):
+    """Liest eine gültige GPS-Position (mode 2/3) via gpsd/gpspipe."""
+    p = subprocess.Popen(["gpspipe", "-w", "-n", "60"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    start = time.time()
+    try:
+        for raw in p.stdout:
+            if time.time() - start > timeout_s:
+                break
+            try:
+                o = json.loads(raw.decode("utf-8", "ignore"))
+            except Exception:
+                continue
+            if o.get("class") == "TPV" and o.get("mode") in (2, 3):
+                lat, lon = o.get("lat"), o.get("lon")
+                if lat is not None and lon is not None:
+                    return float(lat), float(lon)
+    finally:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    return None
+
+# ---------------- Hilfen ----------------
+def _fmt_dist_m(meters):
+    try:
+        d = float(meters)
+    except:
+        return ""
+    if d < 1000:
+        return f"{int(round(d))} m"
+    km = d/1000.0
+    return f"{km:.1f} km"
+
+def _dir8_from_bearing(bearing_deg):
+    """N, NO, O, SO, S, SW, W, NW – mit 'O' für Osten."""
+    if bearing_deg is None:
+        return ""
+    try:
+        b = float(bearing_deg) % 360.0
+    except:
+        return ""
+    names = ["N","NO","O","SO","S","SW","W","NW"]
+    idx = int((b + 22.5)//45) % 8
+    return names[idx]
+
+def _first(lst, default=""):
+    return lst[0] if (isinstance(lst, list) and len(lst)>0) else default
+
+# ---------------- Valhalla ----------------
+def _valhalla_first_maneuver(cur_lat, cur_lon):
+    """Fragt Valhalla und gibt das erste Manöver-Objekt zurück (dict) oder None."""
+    payload = {
+        "locations": [{"lat": cur_lat, "lon": cur_lon},
+                      {"lat": DST_LAT, "lon": DST_LON}],
+        "costing": "auto",
+        "directions_options": {"language": "de-DE", "units": "kilometers"}
+    }
+    if EXCLUDE_TOLLS:
+        payload["costing_options"] = {"auto": {"exclude_tolls": True}}
+
+    try:
+        res = subprocess.run(
+            ["curl", "-s", "-H", "Content-Type: application/json",
+             "-X", "POST", VALHALLA_URL, "-d", json.dumps(payload)],
+            capture_output=True, text=True, timeout=10
+        )
+        data = json.loads(res.stdout)
+        m = data["trip"]["legs"][0]["maneuvers"][0]
+        return m
+    except Exception as e:
+        log(f"Valhalla Fehler: {e}")
+        return None
+
+def _classify_and_format(m):
+    """
+    Aus Valhalla-Manöver ein kompaktes Paket bauen:
+      i: Icon-Index (0..5)
+      t: Top-Zeile (Distanz/Himmelsrichtung/Ausfahrt)
+      b: Bottom-Zeile (Strassenname)
+    """
+    if not m:
+        return ICON_STRAIGHT, "keine Route", ""
+
+    # Typen & Felder
+    vtype = int(m.get("type", -1))  # Valhalla maneuver type int
+    street = _first(m.get("street_names"), "")
+    bearing_after = m.get("bearing_after", None)
+    length_km = float(m.get("length", 0.0))  # km
+    length_m = max(0, int(round(length_km * 1000)))
+    exit_no = m.get("exit_number", None)
+
+    # Heuristik: mapping auf unsere 6 Icons
+    # (Konservativ – nimmt typische Typen/Wortlaute)
+    icon = ICON_STRAIGHT
+    top  = ""
+    bot  = street
+
+    # Roundabout?
+    # Valhalla roundabout-typen: enter_roundabout(23), exit_roundabout(24), remain_roundabout, etc.
+    if vtype in (23,24,25,26,27) or "Kreisverkehr" in (m.get("instruction","") or ""):
+        icon = ICON_ROUNDABOUT
+        if exit_no:
+            try:
+                n = int(exit_no)
+                # Deutsch: "2. Ausfahrt"
+                top = f"{n}. Ausfahrt"
+            except:
+                top = "Kreisverkehr"
+        else:
+            top = "Kreisverkehr"
+        return icon, top, bot
+
+    # Links/Rechts abbiegen / halten
+    inst = (m.get("verbal_succinct_transition_instruction") or
+            m.get("verbal_pre_transition_instruction") or
+            m.get("instruction") or "")
+    inst_low = inst.lower()
+    if "links abbiegen" in inst_low or vtype in (15,17):   # left / sharp left
+        icon = ICON_TURN_LEFT
+        top  = _fmt_dist_m(length_m)
+        return icon, top, bot
+    if "rechts abbiegen" in inst_low or vtype in (16,18):  # right / sharp right
+        icon = ICON_TURN_RIGHT
+        top  = _fmt_dist_m(length_m)
+        return icon, top, bot
+    if "halb links" in inst_low or "links halten" in inst_low or vtype in (13,19):
+        icon = ICON_KEEP_LEFT
+        top  = _fmt_dist_m(length_m)
+        return icon, top, bot
+    if "halb rechts" in inst_low or "rechts halten" in inst_low or vtype in (14,20):
+        icon = ICON_KEEP_RIGHT
+        top  = _fmt_dist_m(length_m)
+        return icon, top, bot
+
+    # Default: geradeaus → Himmelsrichtung oben, Strasse unten
+    icon = ICON_STRAIGHT
+    top  = _dir8_from_bearing(bearing_after)
+    return icon, top, bot
+
+# ---------------- Serial ----------------
+def _open_serial_blocking(dev, baud):
+    """Öffnet die serielle Schnittstelle, wartet bis das Gerät verfügbar ist."""
+    while True:
+        try:
+            ser = serial.Serial(dev, baud, timeout=2)
+            try:
+                ser.setDTR(False)  # Auto-Reset vermeiden
+            except Exception:
+                pass
+            time.sleep(2)          # Reset abwarten
+            return ser
+        except Exception:
+            time.sleep(1)
+
+# ---------------- Navigation Loop ----------------
+def _nav_loop():
+    global _running, _stop, _last_fix_time
+    ser = _open_serial_blocking(SERIAL_DEV, BAUD)
+    log("Navigation gestartet (Loop).")
+    try:
+        while not _stop:
+            # WICHTIG: gpsd jede Runde neu starten (dein gewünschtes Verhalten)
+            subprocess.run(["sudo", "systemctl", "restart", "gpsd"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            fix = _get_gps(timeout_s=6)
+
+            if not fix:
+                # kein Fix → immer senden
+                pkt = {"i": ICON_STRAIGHT, "t":"kein GPS", "b":""}
+                line = json.dumps(pkt, ensure_ascii=False)
+                try:
+                    ser.write((line+"\n").encode("utf-8"))
+                    ser.flush()
+                except Exception:
+                    try: ser.close()
+                    except: pass
+                    ser = _open_serial_blocking(SERIAL_DEV, BAUD)
+                    ser.write((line+"\n").encode("utf-8"))
+                    ser.flush()
+                log(f"SEND → {line}")
+                time.sleep(INTERVAL)
+                continue
+
+            _last_fix_time = time.time()
+            lat, lon = fix
+            log(f"GPS fix: lat={lat:.6f}, lon={lon:.6f}")
+
+            m = _valhalla_first_maneuver(lat, lon)
+            if _args.debug and m:
+                # etwas kompakter loggen
+                sample = {k:m.get(k) for k in ("type","instruction","verbal_pre_transition_instruction","street_names","bearing_after","length","exit_number")}
+                log(f"Valhalla 1. Manöver: {json.dumps(sample, ensure_ascii=False)}")
+
+            i, t, b = _classify_and_format(m)
+            pkt = {"i": int(i), "t": str(t), "b": str(b)}
+            line = json.dumps(pkt, ensure_ascii=False)
+
+            try:
+                ser.write((line+"\n").encode("utf-8"))
+                ser.flush()
+            except Exception:
+                try: ser.close()
+                except: pass
+                ser = _open_serial_blocking(SERIAL_DEV, BAUD)
+                ser.write((line+"\n").encode("utf-8"))
+                ser.flush()
+
+            log(f"SEND → {line}")
+            time.sleep(INTERVAL)
+
+    finally:
+        try: ser.close()
+        except: pass
+        _running = False
+        _stop = False
+        log("Navigation beendet.")
+
+def _start_nav():
+    global _running, _stop
+    if _running:
+        return
+    _stop = False
+    _running = True
+    th = threading.Thread(target=_nav_loop, daemon=True)
+    th.start()
+
+# ---------------- Shutdown Button ----------------
+def _shutdown_button_watcher():
+    last = GPIO.input(BTN_SHUTDOWN)
+    while True:
+        cur = GPIO.input(BTN_SHUTDOWN)
+        if last == GPIO.HIGH and cur == GPIO.LOW:  # gedrückt
+            time.sleep(0.05)
+            if GPIO.input(BTN_SHUTDOWN) == GPIO.LOW:
+                print("Shutdown-Button gedrückt → Raspberry Pi wird heruntergefahren.")
+                subprocess.run(["sudo", "shutdown", "-h", "now"])
+                while GPIO.input(BTN_SHUTDOWN) == GPIO.LOW:
+                    time.sleep(0.02)
+        last = cur
+        time.sleep(0.02)
+
+# ---------------- Main ----------------
+def main():
+    global _args
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--debug", action="store_true", help="Mehr Log-Ausgaben")
+    _args = ap.parse_args()
+
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(BTN_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)        # Startknopf
+    GPIO.setup(BTN_SHUTDOWN, GPIO.IN, pull_up_down=GPIO.PUD_UP)   # Shutdown-Knopf
+
+    # Hintergrund-Thread für Shutdown-Button starten
+    threading.Thread(target=_shutdown_button_watcher, daemon=True).start()
+
+    print("Bereit. Drücke den Button (GPIO 26) um die Navigation zu starten.")
+    while True:
+        if GPIO.input(BTN_PIN) == GPIO.LOW:
+            time.sleep(0.05)  # Entprellen
+            if GPIO.input(BTN_PIN) == GPIO.LOW:
+                print("Button erkannt → starte Navigation.")
+                _start_nav()
+                while GPIO.input(BTN_PIN) == GPIO.LOW:
+                    time.sleep(0.02)
+        time.sleep(0.05)
+
+if __name__ == "__main__":
+    try:
+        _last_fix_time = 0
+        main()
+    except KeyboardInterrupt:
+        GPIO.cleanup()
+
+
+verwende aber nun die neue Logik um die Valhalla Ausgabe in Pakete zu verarbeiten:
+
+# >>> ZIEL & MAUT (nur diese 3 Zeilen bei Bedarf ändern) <<<
+DST_LAT = 47.1662         # Ziel-Breitengrad
+DST_LON = 8.5160          # Ziel-Längengrad
+EXCLUDE_TOLLS = True      # True = Maut vermeiden, False = Maut erlaubt
+
+# ===== ab hier nichts mehr ändern, außer Port/Baud falls nötig =====
+import json, subprocess, time, threading, os, sys, math, argparse
+import RPi.GPIO as GPIO
+import serial
+
+# Hardware/Timing
+BTN_PIN = 26                     # BCM 26 → Start Navigation
+BTN_SHUTDOWN = 19                # BCM 19 → Shutdown
+SERIAL_DEV = "/dev/ttyACM0"      # Arduino-Display
+BAUD = 115200
+INTERVAL = 3                     # Sekunden zwischen Updates
+VALHALLA_URL = "http://localhost:8002/route"
+
+# Icon-Indizes müssen zum Arduino/bitmaps.h passen:
+# 0=geradeaus, 1=links abbiegen, 2=links einspuren/halten, 3=rechts abbiegen, 4=rechts einspuren/halten, 5=Kreisverkehr
+ICON_STRAIGHT     = 0
+ICON_TURN_LEFT    = 1
+ICON_KEEP_LEFT    = 2
+ICON_TURN_RIGHT   = 3
+ICON_KEEP_RIGHT   = 4
+ICON_ROUNDABOUT   = 5
+
+_running = False
+_stop = False
+_last_fix_time = 0
+_args = None
+
+def log(msg):
+    if _args and _args.debug:
+        ts = time.strftime("[%H:%M:%S]")
+        print(f"{ts} {msg}")
+
+# ---------------- GPS ----------------
+def _get_gps(timeout_s=6):
+    """Liest eine gültige GPS-Position (mode 2/3) via gpsd/gpspipe."""
+    p = subprocess.Popen(["gpspipe", "-w", "-n", "60"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    start = time.time()
+    try:
+        for raw in p.stdout:
+            if time.time() - start > timeout_s:
+                break
+            try:
+                o = json.loads(raw.decode("utf-8", "ignore"))
+            except Exception:
+                continue
+            if o.get("class") == "TPV" and o.get("mode") in (2, 3):
+                lat, lon = o.get("lat"), o.get("lon")
+                if lat is not None and lon is not None:
+                    return float(lat), float(lon)
+    finally:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    return None
+
+# ---------------- Hilfen ----------------
+def _fmt_dist_m(meters):
+    try:
+        d = float(meters)
+    except:
+        return ""
+    if d < 1000:
+        return f"{int(round(d))} m"
+    km = d/1000.0
+    return f"{km:.1f} km"
+
+def _dir8_from_bearing(bearing_deg):
+    """N, NO, O, SO, S, SW, W, NW – mit 'O' für Osten."""
+    if bearing_deg is None:
+        return ""
+    try:
+        b = float(bearing_deg) % 360.0
+    except:
+        return ""
+    names = ["N","NO","O","SO","S","SW","W","NW"]
+    idx = int((b + 22.5)//45) % 8
+    return names[idx]
+
+def _first(lst, default=""):
+    return lst[0] if (isinstance(lst, list) and len(lst)>0) else default
+
+# ---------------- Valhalla ----------------
+def _valhalla_first_maneuver(cur_lat, cur_lon):
+    """Fragt Valhalla und gibt das erste Manöver-Objekt zurück (dict) oder None."""
+    payload = {
+        "locations": [{"lat": cur_lat, "lon": cur_lon},
+                      {"lat": DST_LAT, "lon": DST_LON}],
+        "costing": "auto",
+        "directions_options": {"language": "de-DE", "units": "kilometers"}
+    }
+    if EXCLUDE_TOLLS:
+        payload["costing_options"] = {"auto": {"exclude_tolls": True}}
+
+    try:
+        res = subprocess.run(
+            ["curl", "-s", "-H", "Content-Type: application/json",
+             "-X", "POST", VALHALLA_URL, "-d", json.dumps(payload)],
+            capture_output=True, text=True, timeout=10
+        )
+        data = json.loads(res.stdout)
+        m = data["trip"]["legs"][0]["maneuvers"][0]
+        return m
+    except Exception as e:
+        log(f"Valhalla Fehler: {e}")
+        return None
+
+def _classify_and_format(m):
+    """
+    Aus Valhalla-Manöver ein kompaktes Paket bauen:
+      i: Icon-Index (0..5)
+      t: Top-Zeile (Distanz/Himmelsrichtung/Ausfahrt)
+      b: Bottom-Zeile (Strassenname)
+    """
+    if not m:
+        return ICON_STRAIGHT, "keine Route", ""
+
+    # Typen & Felder
+    vtype = int(m.get("type", -1))  # Valhalla maneuver type int
+    street = _first(m.get("street_names"), "")
+    bearing_after = m.get("bearing_after", None)
+    length_km = float(m.get("length", 0.0))  # km
+    length_m = max(0, int(round(length_km * 1000)))
+    exit_no = m.get("exit_number", None)
+
+    # Heuristik: mapping auf unsere 6 Icons
+    # (Konservativ – nimmt typische Typen/Wortlaute)
+    icon = ICON_STRAIGHT
+    top  = ""
+    bot  = street
+
+    # Roundabout?
+    # Valhalla roundabout-typen: enter_roundabout(23), exit_roundabout(24), remain_roundabout, etc.
+    if vtype in (23,24,25,26,27) or "Kreisverkehr" in (m.get("instruction","") or ""):
+        icon = ICON_ROUNDABOUT
+        if exit_no:
+            try:
+                n = int(exit_no)
+                # Deutsch: "2. Ausfahrt"
+                top = f"{n}. Ausfahrt"
+            except:
+                top = "Kreisverkehr"
+        else:
+            top = "Kreisverkehr"
+        return icon, top, bot
+
+    # Links/Rechts abbiegen / halten
+    inst = (m.get("verbal_succinct_transition_instruction") or
+            m.get("verbal_pre_transition_instruction") or
+            m.get("instruction") or "")
+    inst_low = inst.lower()
+    if "links abbiegen" in inst_low or vtype in (15,17):   # left / sharp left
+        icon = ICON_TURN_LEFT
+        top  = _fmt_dist_m(length_m)
+        return icon, top, bot
+    if "rechts abbiegen" in inst_low or vtype in (16,18):  # right / sharp right
+        icon = ICON_TURN_RIGHT
+        top  = _fmt_dist_m(length_m)
+        return icon, top, bot
+    if "halb links" in inst_low or "links halten" in inst_low or vtype in (13,19):
+        icon = ICON_KEEP_LEFT
+        top  = _fmt_dist_m(length_m)
+        return icon, top, bot
+    if "halb rechts" in inst_low or "rechts halten" in inst_low or vtype in (14,20):
+        icon = ICON_KEEP_RIGHT
+        top  = _fmt_dist_m(length_m)
+        return icon, top, bot
+
+    # Default: geradeaus → Himmelsrichtung oben, Strasse unten
+    icon = ICON_STRAIGHT
+    top  = _dir8_from_bearing(bearing_after)
+    return icon, top, bot
+
+# ---------------- Serial ----------------
+def _open_serial_blocking(dev, baud):
+    """Öffnet die serielle Schnittstelle, wartet bis das Gerät verfügbar ist."""
+    while True:
+        try:
+            ser = serial.Serial(dev, baud, timeout=2)
+            try:
+                ser.setDTR(False)  # Auto-Reset vermeiden
+            except Exception:
+                pass
+            time.sleep(2)          # Reset abwarten
+            return ser
+        except Exception:
+            time.sleep(1)
+
+# ---------------- Navigation Loop ----------------
+def _nav_loop():
+    global _running, _stop, _last_fix_time
+    ser = _open_serial_blocking(SERIAL_DEV, BAUD)
+    log("Navigation gestartet (Loop).")
+    try:
+        while not _stop:
+            # WICHTIG: gpsd jede Runde neu starten (dein gewünschtes Verhalten)
+            subprocess.run(["sudo", "systemctl", "restart", "gpsd"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            fix = _get_gps(timeout_s=6)
+
+            if not fix:
+                # kein Fix → immer senden
+                pkt = {"i": ICON_STRAIGHT, "t":"kein GPS", "b":""}
+                line = json.dumps(pkt, ensure_ascii=False)
+                try:
+                    ser.write((line+"\n").encode("utf-8"))
+                    ser.flush()
+                except Exception:
+                    try: ser.close()
+                    except: pass
+                    ser = _open_serial_blocking(SERIAL_DEV, BAUD)
+                    ser.write((line+"\n").encode("utf-8"))
+                    ser.flush()
+                log(f"SEND → {line}")
+                time.sleep(INTERVAL)
+                continue
+
+            _last_fix_time = time.time()
+            lat, lon = fix
+            log(f"GPS fix: lat={lat:.6f}, lon={lon:.6f}")
+
+            m = _valhalla_first_maneuver(lat, lon)
+            if _args.debug and m:
+                # etwas kompakter loggen
+                sample = {k:m.get(k) for k in ("type","instruction","verbal_pre_transition_instruction","street_names","bearing_after","length","exit_number")}
+                log(f"Valhalla 1. Manöver: {json.dumps(sample, ensure_ascii=False)}")
+
+            i, t, b = _classify_and_format(m)
+            pkt = {"i": int(i), "t": str(t), "b": str(b)}
+            line = json.dumps(pkt, ensure_ascii=False)
+
+            try:
+                ser.write((line+"\n").encode("utf-8"))
+                ser.flush()
+            except Exception:
+                try: ser.close()
+                except: pass
+                ser = _open_serial_blocking(SERIAL_DEV, BAUD)
+                ser.write((line+"\n").encode("utf-8"))
+                ser.flush()
+
+            log(f"SEND → {line}")
+            time.sleep(INTERVAL)
+
+    finally:
+        try: ser.close()
+        except: pass
+        _running = False
+        _stop = False
+        log("Navigation beendet.")
+
+def _start_nav():
+    global _running, _stop
+    if _running:
+        return
+    _stop = False
+    _running = True
+    th = threading.Thread(target=_nav_loop, daemon=True)
+    th.start()
+
+# ---------------- Shutdown Button ----------------
+def _shutdown_button_watcher():
+    last = GPIO.input(BTN_SHUTDOWN)
+    while True:
+        cur = GPIO.input(BTN_SHUTDOWN)
+        if last == GPIO.HIGH and cur == GPIO.LOW:  # gedrückt
+            time.sleep(0.05)
+            if GPIO.input(BTN_SHUTDOWN) == GPIO.LOW:
+                print("Shutdown-Button gedrückt → Raspberry Pi wird heruntergefahren.")
+                subprocess.run(["sudo", "shutdown", "-h", "now"])
+                while GPIO.input(BTN_SHUTDOWN) == GPIO.LOW:
+                    time.sleep(0.02)
+        last = cur
+        time.sleep(0.02)
+
+# ---------------- Main ----------------
+def main():
+    global _args
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--debug", action="store_true", help="Mehr Log-Ausgaben")
+    _args = ap.parse_args()
+
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(BTN_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)        # Startknopf
+    GPIO.setup(BTN_SHUTDOWN, GPIO.IN, pull_up_down=GPIO.PUD_UP)   # Shutdown-Knopf
+
+    # Hintergrund-Thread für Shutdown-Button starten
+    threading.Thread(target=_shutdown_button_watcher, daemon=True).start()
+
+    print("Bereit. Drücke den Button (GPIO 26) um die Navigation zu starten.")
+    while True:
+        if GPIO.input(BTN_PIN) == GPIO.LOW:
+            time.sleep(0.05)  # Entprellen
+            if GPIO.input(BTN_PIN) == GPIO.LOW:
+                print("Button erkannt → starte Navigation.")
+                _start_nav()
+                while GPIO.input(BTN_PIN) == GPIO.LOW:
+                    time.sleep(0.02)
+        time.sleep(0.05)
+
+if __name__ == "__main__":
+    try:
+        _last_fix_time = 0
+        main()
+    except KeyboardInterrupt:
+        GPIO.cleanup()
+
+gib mir das neue Pi Skript
+
+ChatGPT:
+Hier ist dein aktualisiertes Raspberry-Pi-Skript, angepasst an die neue Logik und mit der zusätzlichen Behandlung für das all_black-Icon (Index 6), wenn kein GPS verfügbar ist oder die Route noch nicht gestartet wurde („Warte auf Anweisung“):
+
+# >>> ZIEL & MAUT (nur diese 3 Zeilen bei Bedarf ändern) <<<
+DST_LAT = 47.1662         # Ziel-Breitengrad
+DST_LON = 8.5160          # Ziel-Längengrad
+EXCLUDE_TOLLS = True      # True = Maut vermeiden, False = Maut erlaubt
+
+# ===== ab hier nichts mehr ändern, außer Port/Baud falls nötig =====
+import json, subprocess, time, threading, os, sys, math, argparse
+import RPi.GPIO as GPIO
+import serial
+
+# Hardware/Timing
+BTN_PIN = 26                     # BCM 26 → Start Navigation
+BTN_SHUTDOWN = 19                # BCM 19 → Shutdown
+SERIAL_DEV = "/dev/ttyACM0"      # Arduino-Display
+BAUD = 115200
+INTERVAL = 3                     # Sekunden zwischen Updates
+VALHALLA_URL = "http://localhost:8002/route"
+
+# Icon-Indizes müssen zum Arduino/bitmaps.h passen:
+# 0=geradeaus, 1=links abbiegen, 2=links einspuren/halten, 3=rechts abbiegen,
+# 4=rechts einspuren/halten, 5=Kreisverkehr, 6=all_black (Wartezustand/kein GPS)
+ICON_STRAIGHT     = 0
+ICON_TURN_LEFT    = 1
+ICON_KEEP_LEFT    = 2
+ICON_TURN_RIGHT   = 3
+ICON_KEEP_RIGHT   = 4
+ICON_ROUNDABOUT   = 5
+ICON_ALL_BLACK    = 6
+
+_running = False
+_stop = False
+_last_fix_time = 0
+_args = None
+
+def log(msg):
+    if _args and _args.debug:
+        ts = time.strftime("[%H:%M:%S]")
+        print(f"{ts} {msg}")
+
+# ---------------- GPS ----------------
+def _get_gps(timeout_s=6):
+    """Liest eine gültige GPS-Position (mode 2/3) via gpsd/gpspipe."""
+    p = subprocess.Popen(["gpspipe", "-w", "-n", "60"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    start = time.time()
+    try:
+        for raw in p.stdout:
+            if time.time() - start > timeout_s:
+                break
+            try:
+                o = json.loads(raw.decode("utf-8", "ignore"))
+            except Exception:
+                continue
+            if o.get("class") == "TPV" and o.get("mode") in (2, 3):
+                lat, lon = o.get("lat"), o.get("lon")
+                if lat is not None and lon is not None:
+                    return float(lat), float(lon)
+    finally:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    return None
+
+# ---------------- Hilfen ----------------
+def _fmt_dist_m(meters):
+    try:
+        d = float(meters)
+    except:
+        return ""
+    if d < 1000:
+        return f"{int(round(d))} m"
+    km = d/1000.0
+    return f"{km:.1f} km"
+
+def _dir8_from_bearing(bearing_deg):
+    """N, NO, O, SO, S, SW, W, NW – mit 'O' für Osten."""
+    if bearing_deg is None:
+        return ""
+    try:
+        b = float(bearing_deg) % 360.0
+    except:
+        return ""
+    names = ["N","NO","O","SO","S","SW","W","NW"]
+    idx = int((b + 22.5)//45) % 8
+    return names[idx]
+
+def _first(lst, default=""):
+    return lst[0] if (isinstance(lst, list) and len(lst)>0) else default
+
+# ---------------- Valhalla ----------------
+def _valhalla_first_maneuver(cur_lat, cur_lon):
+    """Fragt Valhalla und gibt das erste Manöver-Objekt zurück (dict) oder None."""
+    payload = {
+        "locations": [{"lat": cur_lat, "lon": cur_lon},
+                      {"lat": DST_LAT, "lon": DST_LON}],
+        "costing": "auto",
+        "directions_options": {"language": "de-DE", "units": "kilometers"}
+    }
+    if EXCLUDE_TOLLS:
+        payload["costing_options"] = {"auto": {"exclude_tolls": True}}
+
+    try:
+        res = subprocess.run(
+            ["curl", "-s", "-H", "Content-Type: application/json",
+             "-X", "POST", VALHALLA_URL, "-d", json.dumps(payload)],
+            capture_output=True, text=True, timeout=10
+        )
+        data = json.loads(res.stdout)
+        m = data["trip"]["legs"][0]["maneuvers"][0]
+        return m
+    except Exception as e:
+        log(f"Valhalla Fehler: {e}")
+        return None
+
+def _classify_and_format(m):
+    """
+    Aus Valhalla-Manöver ein kompaktes Paket bauen:
+      i: Icon-Index (0..6)
+      t: Top-Zeile (Distanz/Himmelsrichtung/Ausfahrt)
+      b: Bottom-Zeile (Strassenname)
+    """
+    if not m:
+        return ICON_ALL_BLACK, "Warte auf Anweisung", ""
+
+    # Typen & Felder
+    vtype = int(m.get("type", -1))
+    street = _first(m.get("street_names"), "")
+    bearing_after = m.get("bearing_after", None)
+    length_km = float(m.get("length", 0.0))
+    length_m = max(0, int(round(length_km * 1000)))
+    exit_no = m.get("exit_number", None)
+
+    # Standardwerte
+    icon = ICON_STRAIGHT
+    top  = ""
+    bot  = street
+
+    # Kreisverkehr
+    if vtype in (23,24,25,26,27) or "Kreisverkehr" in (m.get("instruction","") or ""):
+        icon = ICON_ROUNDABOUT
+        if exit_no:
+            try:
+                n = int(exit_no)
+                top = f"{n}. Ausfahrt"
+            except:
+                top = "Kreisverkehr"
+        else:
+            top = "Kreisverkehr"
+        return icon, top, bot
+
+    # Abbiegen/Halten
+    inst = (m.get("verbal_succinct_transition_instruction") or
+            m.get("verbal_pre_transition_instruction") or
+            m.get("instruction") or "")
+    inst_low = inst.lower()
+    if "links abbiegen" in inst_low or vtype in (15,17):
+        return ICON_TURN_LEFT, _fmt_dist_m(length_m), bot
+    if "rechts abbiegen" in inst_low or vtype in (16,18):
+        return ICON_TURN_RIGHT, _fmt_dist_m(length_m), bot
+    if "halb links" in inst_low or "links halten" in inst_low or vtype in (13,19):
+        return ICON_KEEP_LEFT, _fmt_dist_m(length_m), bot
+    if "halb rechts" in inst_low or "rechts halten" in inst_low or vtype in (14,20):
+        return ICON_KEEP_RIGHT, _fmt_dist_m(length_m), bot
+
+    # Geradeaus
+    return ICON_STRAIGHT, _dir8_from_bearing(bearing_after), bot
+
+# ---------------- Serial ----------------
+def _open_serial_blocking(dev, baud):
+    """Öffnet die serielle Schnittstelle, wartet bis das Gerät verfügbar ist."""
+    while True:
+        try:
+            ser = serial.Serial(dev, baud, timeout=2)
+            try:
+                ser.setDTR(False)  # Auto-Reset vermeiden
+            except Exception:
+                pass
+            time.sleep(2)          # Reset abwarten
+            return ser
+        except Exception:
+            time.sleep(1)
+
+# ---------------- Navigation Loop ----------------
+def _nav_loop():
+    global _running, _stop, _last_fix_time
+    ser = _open_serial_blocking(SERIAL_DEV, BAUD)
+    log("Navigation gestartet (Loop).")
+    try:
+        while not _stop:
+            subprocess.run(["sudo", "systemctl", "restart", "gpsd"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            fix = _get_gps(timeout_s=6)
+
+            if not fix:
+                pkt = {"i": ICON_ALL_BLACK, "t": "kein GPS", "b": ""}
+                line = json.dumps(pkt, ensure_ascii=False)
+                try:
+                    ser.write((line+"\n").encode("utf-8"))
+                    ser.flush()
+                except Exception:
+                    try: ser.close()
+                    except: pass
+                    ser = _open_serial_blocking(SERIAL_DEV, BAUD)
+                    ser.write((line+"\n").encode("utf-8"))
+                    ser.flush()
+                log(f"SEND → {line}")
+                time.sleep(INTERVAL)
+                continue
+
+            _last_fix_time = time.time()
+            lat, lon = fix
+            log(f"GPS fix: lat={lat:.6f}, lon={lon:.6f}")
+
+            m = _valhalla_first_maneuver(lat, lon)
+            if _args.debug and m:
+                sample = {k:m.get(k) for k in ("type","instruction",
+                                               "verbal_pre_transition_instruction",
+                                               "street_names","bearing_after",
+                                               "length","exit_number")}
+                log(f"Valhalla 1. Manöver: {json.dumps(sample, ensure_ascii=False)}")
+
+            i, t, b = _classify_and_format(m)
+            pkt = {"i": int(i), "t": str(t), "b": str(b)}
+            line = json.dumps(pkt, ensure_ascii=False)
+
+            try:
+                ser.write((line+"\n").encode("utf-8"))
+                ser.flush()
+            except Exception:
+                try: ser.close()
+                except: pass
+                ser = _open_serial_blocking(SERIAL_DEV, BAUD)
+                ser.write((line+"\n").encode("utf-8"))
+                ser.flush()
+
+            log(f"SEND → {line}")
+            time.sleep(INTERVAL)
+
+    finally:
+        try: ser.close()
+        except: pass
+        _running = False
+        _stop = False
+        log("Navigation beendet.")
+
+def _start_nav():
+    global _running, _stop
+    if _running:
+        return
+    _stop = False
+    _running = True
+    th = threading.Thread(target=_nav_loop, daemon=True)
+    th.start()
+
+# ---------------- Shutdown Button ----------------
+def _shutdown_button_watcher():
+    last = GPIO.input(BTN_SHUTDOWN)
+    while True:
+        cur = GPIO.input(BTN_SHUTDOWN)
+        if last == GPIO.HIGH and cur == GPIO.LOW:
+            time.sleep(0.05)
+            if GPIO.input(BTN_SHUTDOWN) == GPIO.LOW:
+                print("Shutdown-Button gedrückt → Raspberry Pi wird heruntergefahren.")
+                subprocess.run(["sudo", "shutdown", "-h", "now"])
+                while GPIO.input(BTN_SHUTDOWN) == GPIO.LOW:
+                    time.sleep(0.02)
+        last = cur
+        time.sleep(0.02)
+
+# ---------------- Main ----------------
+def main():
+    global _args
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--debug", action="store_true", help="Mehr Log-Ausgaben")
+    _args = ap.parse_args()
+
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(BTN_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(BTN_SHUTDOWN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+    threading.Thread(target=_shutdown_button_watcher, daemon=True).start()
+
+    print("Bereit. Drücke den Button (GPIO 26) um die Navigation zu starten.")
+    while True:
+        if GPIO.input(BTN_PIN) == GPIO.LOW:
+            time.sleep(0.05)
+            if GPIO.input(BTN_PIN) == GPIO.LOW:
+                print("Button erkannt → starte Navigation.")
+                _start_nav()
+                while GPIO.input(BTN_PIN) == GPIO.LOW:
+                    time.sleep(0.02)
+        time.sleep(0.05)
+
+if __name__ == "__main__":
+    try:
+        _last_fix_time = 0
+        main()
+    except KeyboardInterrupt:
+        GPIO.cleanup()
+👉 Änderungen gegenüber deinem alten Stand:
+
+Neues Icon ICON_ALL_BLACK = 6.
+
+_classify_and_format(m) gibt all_black zurück, wenn kein Manöver vorhanden ist → "Warte auf Anweisung".
+
+Bei kein GPS-Fix wird ebenfalls all_black gesendet, mit Text "kein GPS".
+
+Möchtest du, dass wir auch gleich die Arduino-Seite so anpassen, dass "t" (Top-Zeile) und "b" (Bottom-Zeile) bei all_black komplett leer angezeigt werden (schwarzer Screen ohne Text)?
+
+
+
+Keine ausgewähltKeine ausgewählt
+ChatGPT kann Fehler machen. Überprüfe wichtige Informationen.
