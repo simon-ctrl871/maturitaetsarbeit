@@ -9,6 +9,6 @@ Hier ist eine Hilfestellung, um zu einem bestimmten Kapitel oder Abschnitt der s
 - Valhalla Routing-Engine -> Bluetooth Steuerung für Spotify
 - OpenStreetMap -> Valhalla Installation Raspberry Pi
 - GPS-Empfänger -> USB GPS am Raspberry Pi
-- 
+- Navigation mit Piktogrammen -> Valhalla Navigation
 
 
