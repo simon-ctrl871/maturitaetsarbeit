@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 # >>> ZIEL & MODUS (nur hier ändern) <<<
-USE_GPS = True                        # True = GPS verwenden, False = feste Koordinaten
-START = "47.228984,8.675313"              # Startkoordinaten im Format "lat,lon" (nur bei USE_GPS = False)
-DST   = "47.240252,8.639224"          # Zielkoordinaten im Format "lat,lon"
-EXCLUDE_TOLLS = True                  # Maut vermeiden
+USE_GPS = True
+START = "47.228984,8.675313"       #Koordinaten im 
+DST   = "47.240252,8.639224"       #Format "lat,lon"
+EXCLUDE_TOLLS = True               
 
 import sys
 DEBUG = "--debug" in sys.argv
@@ -27,9 +27,8 @@ DST_LAT, DST_LON = _parse_latlon(DST, "DST")
 START_LAT, START_LON = _parse_latlon(START, "START")
 
 # Hardware/Timing
-BTN_SHUTDOWN = 18           
+BTN_SHUTDOWN = 18
 SERIAL_DEV = "/dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_75834303538351904181-if00"
-
 BAUD = 115200
 INTERVAL = 3
 VALHALLA_URL = "http://localhost:8002/route"
@@ -66,7 +65,11 @@ def _get_gps(timeout_s=6, verbose=False):
     if not USE_GPS:
         return START_LAT, START_LON
 
-    p = subprocess.Popen(["gpspipe", "-w", "-n", "60"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    p = subprocess.Popen(
+        ["gpspipe", "-w", "-n", "60"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL
+    )
     start = time.time()
     try:
         for raw in p.stdout:
@@ -76,7 +79,7 @@ def _get_gps(timeout_s=6, verbose=False):
                 o = json.loads(raw.decode("utf-8", "ignore"))
                 if o.get("class") == "TPV":
                     if verbose and o.get("mode", 0) < 2:
-                        print(f"[{time.strftime('%H:%M:%S')}] 📡 Noch kein GPS-Fix...")
+                        print(f"[{time.strftime('%H:%M:%S')}] Noch kein GPS-Fix...")
                     if o.get("mode") in (2, 3):
                         lat, lon = o.get("lat"), o.get("lon")
                         if lat and lon:
@@ -107,7 +110,10 @@ def _open_serial_blocking(dev, baud):
 
 def _get_valhalla_response(start_lat, start_lon):
     payload = {
-        "locations": [{"lat": start_lat, "lon": start_lon}, {"lat": DST_LAT, "lon": DST_LON}],
+        "locations": [
+            {"lat": start_lat, "lon": start_lon},
+            {"lat": DST_LAT,  "lon": DST_LON}
+        ],
         "costing": "auto",
         "directions_options": {"language": "de-DE", "units": "kilometers"}
     }
@@ -124,7 +130,7 @@ def _get_valhalla_response(start_lat, start_lon):
     except Exception:
         return None
 
-# === LOGIK: Nur neuer Straßenname in "b", "t" für Himmelsrichtung ===
+# === LOGIK: Distanz + neuer Straßenname / Himmelsrichtung ===
 def _extract_new_streetname_from_text(succinct):
     if not succinct:
         return ""
@@ -146,52 +152,67 @@ def _package_instruction(data):
         return ICON_ALL_BLACK, "", ""
 
     m = maneuvers[0]
-    succinct   = m.get("verbal_succinct_transition_instruction", "")
+    succinct    = m.get("verbal_succinct_transition_instruction", "")
     streetnames = m.get("street_names", [])
-    multi_cue  = m.get("verbal_multi_cue", False)
+    multi_cue   = m.get("verbal_multi_cue", False)
 
-    top = ""          # Zeile oben → Himmelsrichtung
-    new_name = ""     # Zeile unten → neue Straße
+    meters = m.get("length", 0) * 1000  # km → m
+    if meters > 500:
+        dist_m = int(round(meters, -2))               # 100er Schritte
+    elif meters > 100:
+        dist_m = int(round(meters / 50.0) * 50)       # 50er Schritte
+    elif meters >= 10:
+        dist_m = int(round(meters, -1))               # 10er Schritte
+    else:
+        dist_m = 0                                    # letzte Stufe
+
+    top = ""       # Zeile oben
+    new_name = ""  # Zeile unten (Strassenname)
 
     if multi_cue and len(maneuvers) > 1:
+        
         next_m = maneuvers[1]
         t = next_m.get("type")
         names = next_m.get("street_names", [])
 
-        if t in (24,25,26,27):      # Kreisverkehr
+        if t in (24, 25, 26, 27):      # Kreisverkehr
             icon = ICON_ROUNDABOUT
+            top = f"in {dist_m} m"
             new_name = names[0] if names else _extract_new_streetname_from_text(succinct)
 
-        elif t in (9,15):           # Links
+        elif t in (9, 15):             # Links
             icon = ICON_TURN_LEFT
+            top = f"in {dist_m} m"
             new_name = names[0] if names else _extract_new_streetname_from_text(succinct)
 
-        elif t == 10:               # Rechts
+        elif t == 10:                  # Rechts
             icon = ICON_TURN_RIGHT
+            top = f"in {dist_m} m"
             new_name = names[0] if names else _extract_new_streetname_from_text(succinct)
 
-        else:                       # Geradeaus
+        else:                          # Geradeaus mit nächster Aktion
             icon = ICON_STRAIGHT
-            top = bearing_to_cardinal(next_m.get("bearing_after", m.get("bearing_after", 0)))
+            top = bearing_to_cardinal(next_m.get("bearing_after",
+                                                 m.get("bearing_after", 0)))
             new_name = names[0] if names else (streetnames[0] if streetnames else "")
 
     else:
         t = m.get("type")
 
-        if t in (1,2,3):            # Start / Geradeaus
+        if t in (1, 2, 3):             # Start / Geradeaus
             icon = ICON_STRAIGHT
             top = bearing_to_cardinal(m.get("bearing_after", 0))
             new_name = streetnames[0] if streetnames else _extract_new_streetname_from_text(succinct)
 
-        elif t in (9,15):           # Links
+        elif t in (9, 15):             # Links
             icon = ICON_TURN_LEFT
             new_name = streetnames[0] if streetnames else _extract_new_streetname_from_text(succinct)
 
-        elif t == 10:               # Rechts
+        elif t == 10:                  # Rechts
             icon = ICON_TURN_RIGHT
             new_name = streetnames[0] if streetnames else _extract_new_streetname_from_text(succinct)
 
-        elif t in (24,25,26,27):    # Kreisverkehr
+        elif t in (24, 25, 26, 27):    # Kreisverkehr
             icon = ICON_ROUNDABOUT
             new_name = streetnames[0] if streetnames else _extract_new_streetname_from_text(succinct)
 
@@ -212,8 +233,11 @@ def _nav_loop():
     try:
         while not _stop:
             if USE_GPS:
-                subprocess.run(["sudo", "systemctl", "restart", "gpsd"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(
+                    ["sudo", "systemctl", "restart", "gpsd"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
 
             fix = _get_gps(timeout_s=6)
 
@@ -257,7 +281,6 @@ def _nav_loop():
             pass
         _running = False
         _stop = False
-
         print("Navigation beendet.")
 
 def _start_nav():
