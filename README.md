@@ -7,7 +7,7 @@ Wer meine schriftliche Arbeit gelesen hat, sucht sicherlich nach dem Demonstrati
 
 Zum Zeitpunkt der Aufnahme hat die Distanzanzeige vor dem Abbiegen nicht korrekt funktioniert. Seither habe ich dieses Problem behoben und den hochgeladenen Code aktualisiert.
 
-Im Order "Code" befindet sich der finale Code, der auf dem Raspberry Pi und auf dem Arduino ausgeführt wird.
+Im Ordner "Code" befindet sich der finale Code, der auf dem Raspberry Pi und auf dem Arduino ausgeführt wird.
 
 Ich habe hier ebenso ein Arbeitsjournal hochgeladen, sowie jegliche Konversationen mit ChatGPT, die mir während der Entwicklungsphase geholfen haben. 
 Hier ist eine Hilfestellung, um zu einem bestimmten Kapitel oder Abschnitt der schriftlichen Arbeit die zugehörige Konversation zu finden. Dabei ist zu beachten, dass diese Konversationen sehr lange sind und sich oft nur ein Ausschnitt auf den angegebenen Abschnitt bezieht.
