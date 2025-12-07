@@ -3,7 +3,7 @@ In meiner Maturitätsarbeit entwickelte ich ein Offline-Navigationssytem. Auf ei
 
 Demonstrationsvideo:
 
-Wer meine schriftliche Arbeit gelesen hat, sucht sicherlich nach dem Demonstrationsvideo. Da die Datei gross ist, um sie auf GitHub hochzuladen, ist hier ein Link der zum Demonstrationsvideo in Google Drive führt: https://drive.google.com/file/d/1LstXG9QNH3jJEgkffdLUCX2IxxNUCkCr/view?usp=sharing
+Wer meine schriftliche Arbeit gelesen hat, sucht sicherlich nach dem Demonstrationsvideo. Da die Datei zu gross ist, um sie auf GitHub hochzuladen, ist hier ein Link der zum Demonstrationsvideo in Google Drive führt: https://drive.google.com/file/d/1LstXG9QNH3jJEgkffdLUCX2IxxNUCkCr/view?usp=sharing
 
 Zum Zeitpunkt der Aufnahme hat die Distanzanzeige vor dem Abbiegen nicht korrekt funktioniert. Seither habe ich dieses Problem behoben und den hochgeladenen Code aktualisiert.
 
