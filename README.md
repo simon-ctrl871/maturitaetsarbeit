@@ -1,7 +1,8 @@
 # Maturitätsarbeit Simon R.
 In meiner Maturitätsarbeit entwickelte ich ein Offline-Navigationssytem. Auf einem Raspberry Pi läuft die eigentliche Routenberechnung mithilfe der OpenSource Routing-Engine Valhalla, die aus OpenStreetMap-Daten schriftliche Fahranweisungen generieren kann. Diese werden anschliessend umgewandelt in Datenpakete, welche an ein Arduino gesendet werden und dort auf dem verbundenen Display anschaulich dargestellt werden. Dazu werden eigene Piktogramme und zwei Infolines verwendet. Mit einem Smartphone kann auf das Raspberry Pi zugegriffen werden und so das Routenziel geändert werden. Über denselben Weg kann gewählt werden, ob Mautstrassen vermieden werden sollen. Zur Positionsbestimmung wurde ein externer GPS-Empfänger angeschlossen und ein Taster dient als Shutdown-Knopf
 
-Demonstrationsvideo
+Demonstrationsvideo:
+
 Wer meine schriftliche Arbeit gelesen hat, sucht sicherlich nach dem Demonstrationsvideo. Da die Datei gross ist, um sie auf GitHub hochzuladen, ist hier ein Link der zum Demonstrationsvideo in Google Drive führt: https://drive.google.com/file/d/1LstXG9QNH3jJEgkffdLUCX2IxxNUCkCr/view?usp=sharing
 
 Zum Zeitpunkt der Aufnahme hat die Distanzanzeige vor dem Abbiegen nicht korrekt funktioniert. Seither habe ich dieses Problem behoben und den hochgeladenen Code aktualisiert.
